@@ -3,8 +3,10 @@ import httplib2
 import logging
 import mimetypes
 import mimetools
-import urllib
+import urllib, urllib2
+import cookielib
 import urlparse
+import os, time, stat
 
 HTTP_STATUS_OK = '200'
 
@@ -40,13 +42,20 @@ class RestClient(object):
     def _request(self, resource, method, args=None, data=None, headers=None):
         response_data = None
         request_body = self._serialize(data)
-        response_headers, response_content = \
-            self._connection.request(resource, method, args=args,
-                                     body=request_body, headers=headers,
-                                     content_type=self.content_type)
-        if response_headers.get('status') == HTTP_STATUS_OK:
+        response = self._connection.request(resource, method, args=args,
+            body=request_body, headers=headers,
+            content_type=self.content_type)
+        response_content = response.read()
+        response_headers = response.info().items()
+        if response.code == 200:
             response_data = self._deserialize(response_content)
-        return Response(response_headers, response_content, response_data)
+        #response_headers, response_content = \
+        #    self._connection.request(resource, method, args=args,
+        #                             body=request_body, headers=headers,
+        #                             content_type=self.content_type)
+        #if response_headers.get('status') == HTTP_STATUS_OK:
+        #    response_data = self._deserialize(response_content)
+        return Response(response_headers, response_content, response_data,status_code=response.code)
 
     def _serialize(self, data):
         return unicode(data)
@@ -90,11 +99,11 @@ class XmlRestClient(RestClient):
 
 
 class Response(object):
-    def __init__(self, headers, content, data):
+    def __init__(self, headers, content, data, status_code=500):
         self.headers = headers
         self.content = content
         self.data = data
-        self.status_code = int(headers.get('status', '500'))
+        self.status_code = int(status_code)
 
     def __repr__(self):
         return '<Response %s: %s>' % (self.status_code, self.__dict__)
@@ -120,24 +129,93 @@ class BaseConnection(object):
 
 
 class Connection(BaseConnection):
+    _headers={}
+    _csrf_token = None
+
     def __init__(self, *args, **kwargs):
         cache = kwargs.pop('cache', None)
         timeout = kwargs.pop('cache', None)
         proxy_info = kwargs.pop('proxy_info', None)
+        login_url = kwargs.pop('login_url', None)
 
         super(Connection, self).__init__(*args, **kwargs)
 
-        self._conn = httplib2.Http(cache=cache, timeout=timeout,
-                                   proxy_info=proxy_info)
-        self._conn.follow_all_redirects = True
+        #self._conn = httplib2.Http(cache=cache, timeout=timeout,
+        #                           proxy_info=proxy_info)
+        #self._conn.follow_all_redirects = True
+        #cj = cookielib.CookieJar()
+        if (os.path.isfile(os.path.expanduser("~/.ocu_cookie"))
+                and (time.time() - os.stat(os.path.expanduser("~/.ocu_cookie"))[stat.ST_MTIME]) < 3600):
+            os.remove(os.path.expanduser("~/.ocu_cookie"))
 
-        if self.username and self.password:
-            self._conn.add_credentials(self.username, self.password)
+        cj = cookielib.LWPCookieJar()
+
+        self._conn = urllib2.build_opener(
+            urllib2.HTTPCookieProcessor(cj), 
+            urllib2.HTTPHandler(debuglevel=0)
+        )
+
+        #if self.username and self.password:
+        #    self._conn.add_credentials(self.username, self.password)
+
+        if (login_url and os.path.isfile(os.path.expanduser("~/.ocu_cookie"))):
+            cj.load(os.path.expanduser("~/.ocu_cookie"))
+        else(login_url):
+            import getpass
+            username = getpass.getuser()
+            password = getpass.getpass()
+            from lxml import html
+            login_form = self._conn.open(login_url).read()
+            self._csrf_token = html.fromstring(login_form).xpath(
+                '//input[@name="csrfmiddlewaretoken"]/@value')[0]
+            values = {
+                'this_is_the_login_form': 1,
+                'username': username,
+                'password': password,
+                'csrfmiddlewaretoken': self._csrf_token,
+                'next': '/admin/'
+            }
+            params = urllib.urlencode(values)
+            login_page = self._conn.open(login_url, params)
+            
+            cj.save(os.path.expanduser("~/.ocu_cookie"))
+            os.chmod(os.path.expanduser("~/.ocu_cookie"),0600)
+            #import cPickle as pickle
+            #import os
+            #output = open(os.path.expanduser("~/.ocu_session"),'wb')
+            #pickle.dump(cj,output)
+            #output.close()
+            #StringCookieJar.dump(cj)
+
+        #    from pprint import pprint
+        #    response, login_form = self._conn.request(login_url,'GET')
+        #    #self._headers = {'Content-type': 'application/x-www-form-urlencoded'}
+        #    self._headers['Cookie'] = response['set-cookie']
+        #    csrf_token = html.fromstring(login_form).xpath(
+        #                '//input[@name="csrfmiddlewaretoken"]/@value'
+        #                )[0]
+        #    body = {
+        #        'username': 'jrcookli', 
+        #        'password': 'm1sp.s.s', 
+        #        'csrfmiddlewaretoken':csrf_token,
+        #        'this_is_the_login_form': 1,
+        #        'next': '/admin/'
+        #    }
+        #    response, content = self._conn.request(login_url,'POST', headers=self._headers, body=urllib.urlencode(body))
+        #    #pprint(response)
+        #    print("++++++")
+        #    #pprint(content)
+        #    print("======")
+        #    #self._headers['Cookies'] = response['set-cookie']
+        #    print("login_url headers={0}".format(self._headers))
+        #    pprint(response)
 
     def request(self, resource, method, args=None, body=None, headers=None,
                 content_type=None):
         if headers is None:
             headers = {}
+        if (self._headers):
+            headers = dict(headers.items() + self._headers.items())
 
         params = None
         path = resource
@@ -155,6 +233,9 @@ class Connection(BaseConnection):
                 del headers['Content-Length']
 
             headers['Content-Type'] = 'text/plain'
+
+            if (isinstance(args, dict) and self._csrf_token):
+                args["csrfmiddlewaretoken"] = self._csrf_token
 
             if args:
                 if method == "get":
@@ -175,9 +256,28 @@ class Connection(BaseConnection):
                 request_path.append(path[1:])
             else:
                 request_path.append(path)
+        url = u"%s://%s%s" % (self.scheme, self.host,u'/'.join(request_path))
+        request = urllib2.Request(url,headers=headers,data=body)
+        #request = urllib2.Request(url,data=body)
+        return self._conn.open(request)
 
-        response_headers, response_content = \
-            self._conn.request(u"%s://%s%s" % (self.scheme, self.host,
-                               u'/'.join(request_path)), method.upper(),
-                               body=body, headers=headers)
-        return response_headers, response_content
+        #response_headers, response_content = \
+        #    self._conn.request(u"%s://%s%s" % (self.scheme, self.host,
+        #                       u'/'.join(request_path)), method.upper(),
+        #                       body=body, headers=headers)
+        #return response_headers, response_content
+
+from cookielib import CookieJar
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
+
+class StringCookieJar(CookieJar):
+    def __init__(self, string=None, policy=None):
+        CookieJar.__init__(self, policy)
+        if string:
+            self._cookies = pickle.loads(string)
+
+    def dump(self):
+        return pickle.dumps(self._cookies)
