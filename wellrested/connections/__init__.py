@@ -155,8 +155,8 @@ class Connection(BaseConnection):
             cj.load(os.path.expanduser("~/.ocu"))
 
         self._conn = urllib2.build_opener(
-            urllib2.HTTPCookieProcessor(cj), 
-            urllib2.HTTPHandler(debuglevel=0)
+            urllib2.HTTPCookieProcessor(cj)
+            #,urllib2.HTTPHandler(debuglevel=0)
         )
 
         #API token
@@ -178,7 +178,16 @@ class Connection(BaseConnection):
                 'next': '/admin/'
             }
             params = urllib.urlencode(values)
-            login_page = self._conn.open(login_url, params)
+            req = urllib2.Request(login_url, params)
+            req.add_header('Referer', login_url)
+            #print("{0} {1}".format(login_url, params))
+            try:
+                #login_page = self._conn.open(login_url, params)
+                login_page = self._conn.open(req)
+            except Exception as e:
+                import traceback
+                print traceback.print_exc()
+
             
             cj.save(os.path.expanduser("~/.ocu"))
             os.chmod(os.path.expanduser("~/.ocu"),0600)
