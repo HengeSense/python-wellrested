@@ -134,12 +134,14 @@ class Connection(BaseConnection):
     _headers={}
     _csrf_token = None
     _token = None
+    _login_url = None
 
     def __init__(self, *args, **kwargs):
         cache = kwargs.pop('cache', None)
         timeout = kwargs.pop('cache', None)
         proxy_info = kwargs.pop('proxy_info', None)
         login_url = kwargs.pop('login_url', None)
+        self._login_url = login_url
         token = kwargs.pop('token', None)
 
         super(Connection, self).__init__(*args, **kwargs)
@@ -156,7 +158,8 @@ class Connection(BaseConnection):
 
         self._conn = urllib2.build_opener(
             urllib2.HTTPCookieProcessor(cj)
-            #,urllib2.HTTPHandler(debuglevel=0)
+            ,urllib2.HTTPRedirectHandler()
+            ,urllib2.HTTPHandler(debuglevel=0)
         )
 
         #API token
@@ -235,6 +238,9 @@ class Connection(BaseConnection):
 
         if (method == "delete"):
             headers["X-CSRFToken"] = self._csrf_token
+        if (method == "post"):
+            headers["X-CSRFToken"] = self._csrf_token
+        headers['Referer'] = self._login_url
 
         request_path = []
         # Normalise the / in the url path
